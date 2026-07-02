@@ -115,7 +115,7 @@ def load_data() -> pd.DataFrame:
 @st.cache_data
 def compute_area_coefficients(df_json: str) -> dict:
     """Calculate empirical area per garment (m²) for each product_type."""
-    df = pd.read_json(df_json)
+    df = pd.read_json(io.StringIO(df_json))
     df["_area"] = (
         df["consumption_m_per_piece"]
         * (df["width_cm"] / 100)
@@ -140,7 +140,7 @@ def compute_area_coefficients(df_json: str) -> dict:
 @st.cache_data
 def build_efficiency_model(df_json: str) -> pd.DataFrame:
     """Build width→efficiency lookup from all historical data."""
-    df = pd.read_json(df_json)
+    df = pd.read_json(io.StringIO(df_json))
     # Bin widths into ranges and calculate average efficiency per bin
     df["_width_bin"] = pd.cut(df["width_cm"], bins=[0, 60, 80, 100, 120, 160, 200, 300])
     return df.groupby("_width_bin", observed=True)["efficiency_pct"].agg(["mean", "count"]).reset_index()
