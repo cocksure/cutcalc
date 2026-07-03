@@ -1204,6 +1204,9 @@ def build_pdf_report(fc: dict) -> bytes:
             _len = float(ai.get("estimated_length_m"))
         except (TypeError, ValueError):
             _cons = _len = None
+        if _cons is None and fc.get("math_result"):
+            _cons = fc["math_result"]["consumption_m_per_piece"]
+            _len = fc["math_result"]["estimated_length_m"]
         conf = ("УВЕРЕННОСТЬ", CONFIDENCE_LABELS.get(ai.get("confidence"), "—"))
         weight_cards(_cons, _len, extra=conf)
         explanation = ai.get("explanation")
@@ -1712,28 +1715,44 @@ if fc:
     width_m = fc["width_cm"] / 100
     dens = fc["density_gsm"]
 
-    # ── AI forecast — the default view ────────────────────────────────────
+    # Weight basis: AI forecast if parseable, otherwise math forecast
+    _w_cons = _w_len = None
+    if ai:
+        try:
+            _w_cons = float(ai.get("consumption_m_per_piece"))
+            _w_len = float(ai.get("estimated_length_m"))
+        except (TypeError, ValueError):
+            _w_cons = _w_len = None
+    if _w_cons is None and math_result:
+        _w_cons = math_result["consumption_m_per_piece"]
+        _w_len = math_result["estimated_length_m"]
+
+    if dens <= 0:
+        st.warning(
+            "Вес не рассчитан: укажите «Плотность ткани (г/м²)» в боковой панели "
+            "и нажмите «Рассчитать» — появятся вес г/шт и кг на заказ."
+        )
+
+    # ── AI forecast — the default view (weight first-class) ──────────────
     if ai:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Расход", f"{ai.get('consumption_m_per_piece', '—')} м/шт")
-        col2.metric("Диапазон", f"{ai.get('range_min', '—')} – {ai.get('range_max', '—')}")
-        col3.metric("Длина раскладки", f"{ai.get('estimated_length_m', '—')} м")
+        if dens > 0 and _w_cons is not None:
+            col2.metric("Вес ткани", f"{_w_cons * width_m * dens:.0f} г/шт")
+            col3.metric("Вес на заказ", f"{_w_len * width_m * dens / 1000:.2f} кг")
+        else:
+            col2.metric("Вес ткани", "—")
+            col3.metric("Вес на заказ", "—")
         col4.metric("КПД раскладки", f"{ai.get('estimated_efficiency_pct', '—')}%")
 
-        if dens > 0:
-            try:
-                _ai_cons = float(ai.get("consumption_m_per_piece"))
-                _ai_len = float(ai.get("estimated_length_m"))
-            except (TypeError, ValueError):
-                _ai_cons = _ai_len = None
-            if _ai_cons is not None:
-                wc1, wc2, _, _ = st.columns(4)
-                wc1.metric("Вес ткани", f"{_ai_cons * width_m * dens:.0f} г/шт")
-                wc2.metric("Вес на заказ", f"{_ai_len * width_m * dens / 1000:.2f} кг")
-                st.caption(
-                    f"Вес рассчитан при плотности {dens:.0f} г/м² "
-                    f"и ширине {fc['width_cm']:.0f} см."
-                )
+        wc1, wc2, _, _ = st.columns(4)
+        wc1.metric("Диапазон", f"{ai.get('range_min', '—')} – {ai.get('range_max', '—')}")
+        wc2.metric("Длина раскладки", f"{ai.get('estimated_length_m', '—')} м")
+        if dens > 0 and _w_cons is not None:
+            st.caption(
+                f"Вес рассчитан при плотности {dens:.0f} г/м² "
+                f"и ширине {fc['width_cm']:.0f} см."
+            )
 
         confidence = ai.get("confidence", "—")
         confidence_colors = {"high": "green", "medium": "orange", "low": "red"}
