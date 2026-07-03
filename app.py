@@ -1167,7 +1167,9 @@ with st.sidebar:
                     st.caption(
                         "Проверьте комплектность: **Кол-во** — сколько раз деталь входит "
                         "в одно изделие (рукав, манжета — обычно 2). **Сгиб ×2** — если "
-                        "лекало построено половинкой к сгибу. Иначе площадь и вес будут занижены."
+                        "лекало построено половинкой к сгибу. Иначе площадь и вес будут занижены. "
+                        "Таблицу можно править: менять значения, удалять строки (отметить слева "
+                        "и нажать корзину/Delete) и добавлять новые."
                     )
                     mirror_all = st.checkbox(
                         "В DXF только одна сторона комплекта — удвоить все детали (×2)",
@@ -1179,29 +1181,50 @@ with st.sidebar:
                         df_dxf,
                         use_container_width=True,
                         hide_index=True,
-                        disabled=["Деталь", "Площадь (см²)", "Ширина (см)", "Высота (см)"],
+                        num_rows="dynamic",
                         column_config={
+                            "Деталь": st.column_config.TextColumn("Деталь"),
+                            "Площадь (см²)": st.column_config.NumberColumn("Площадь (см²)", min_value=0.0, format="%.1f"),
+                            "Ширина (см)": st.column_config.NumberColumn("Ширина (см)", min_value=0.0, format="%.1f"),
+                            "Высота (см)": st.column_config.NumberColumn("Высота (см)", min_value=0.0, format="%.1f"),
                             "Кол-во": st.column_config.NumberColumn("Кол-во", min_value=1, max_value=10, step=1),
                             "Сгиб ×2": st.column_config.CheckboxColumn("Сгиб ×2"),
                         },
                         key=f"dxf_editor_{uploaded_dxf.name}",
                     )
-                    for i, p in enumerate(dxf_pieces):
-                        p["qty"] = max(int(edited_dxf.iloc[i]["Кол-во"] or 1), 1)
+                    # Rebuild pieces from the edited table (rows may be changed/deleted/added)
+                    dxf_pieces = []
+                    for _, row in edited_dxf.iterrows():
+                        area = float(row["Площадь (см²)"]) if pd.notna(row["Площадь (см²)"]) else 0.0
+                        if area <= 0:
+                            continue
+                        qty = int(row["Кол-во"]) if pd.notna(row["Кол-во"]) else 1
                         if mirror_all:
-                            p["qty"] *= 2
-                        if bool(edited_dxf.iloc[i]["Сгиб ×2"]):
-                            p["area_cm2"] *= 2
-                            p["width_cm"] *= 2
+                            qty *= 2
+                        w = float(row["Ширина (см)"]) if pd.notna(row["Ширина (см)"]) else 0.0
+                        h = float(row["Высота (см)"]) if pd.notna(row["Высота (см)"]) else 0.0
+                        if pd.notna(row["Сгиб ×2"]) and bool(row["Сгиб ×2"]):
+                            area *= 2
+                            w *= 2
+                        dxf_pieces.append({
+                            "name": str(row["Деталь"]) if pd.notna(row["Деталь"]) else "Деталь",
+                            "area_cm2": area,
+                            "width_cm": w,
+                            "height_cm": h,
+                            "qty": max(qty, 1),
+                        })
                     total_dxf_area = sum(p["area_cm2"] * p["qty"] for p in dxf_pieces)
                     units = dxf_diag.get("units_detected", "")
-                    st.success(
-                        f"Найдено {len(dxf_pieces)} деталей, "
-                        f"площадь комплекта на изделие: {total_dxf_area:.0f} см² "
-                        f"({total_dxf_area / 10000:.4f} м²)"
-                        f"{f' | Единицы: {units}' if units else ''}"
-                    )
-                    if product_type and product_type in area_coeffs:
+                    if dxf_pieces:
+                        st.success(
+                            f"В расчёте {len(dxf_pieces)} деталей, "
+                            f"площадь комплекта на изделие: {total_dxf_area:.0f} см² "
+                            f"({total_dxf_area / 10000:.4f} м²)"
+                            f"{f' | Единицы: {units}' if units else ''}"
+                        )
+                    else:
+                        st.warning("Все детали удалены из таблицы — DXF не будет использован в расчёте.")
+                    if dxf_pieces and product_type and product_type in area_coeffs:
                         _hist_area = area_coeffs[product_type]["area_mean"]
                         if total_dxf_area / 10000 < 0.7 * _hist_area:
                             st.warning(
@@ -1394,6 +1417,8 @@ if predict_btn:
         # Each DXF piece × qty per garment × total_garments
         pieces_info = []
         for p in dxf_pieces:
+            if p["width_cm"] <= 0 or p["height_cm"] <= 0:
+                continue  # manually added row without dimensions — area only
             pieces_info.append((
                 p["width_cm"], p["height_cm"], p["name"],
                 input_total * p.get("qty", 1),  # total count across all garments
