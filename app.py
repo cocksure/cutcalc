@@ -1126,6 +1126,15 @@ with st.sidebar:
         step=5.0,
     )
 
+    density_gsm = st.number_input(
+        "Плотность ткани (г/м²)",
+        min_value=0.0,
+        max_value=1000.0,
+        value=0.0,
+        step=10.0,
+        help="Необязательно. Если указана — расход дополнительно пересчитывается в вес (г/шт и кг на заказ).",
+    )
+
     sizes = st.text_input(
         "Размерный ассортимент",
         placeholder="116/1 128/1 140/2 152/3 164/5",
@@ -1428,6 +1437,12 @@ if predict_btn:
         mc2.metric("Диапазон", f"{math_result['range_min']} – {math_result['range_max']}")
         mc3.metric("Длина раскладки", f"{math_result['estimated_length_m']} м")
         mc4.metric("КПД (средний)", f"{math_result['estimated_efficiency_pct']}%")
+        if density_gsm > 0:
+            _wpp_g = math_result["consumption_m_per_piece"] * (width_cm / 100) * density_gsm
+            _total_kg = math_result["estimated_length_m"] * (width_cm / 100) * density_gsm / 1000
+            wc1, wc2, _, _ = st.columns(4)
+            wc1.metric("Вес ткани", f"{_wpp_g:.0f} г/шт")
+            wc2.metric("Вес на заказ", f"{_total_kg:.2f} кг")
         source_text = f"Площадь лекал: {math_result['area_per_piece_m2']} м²/изделие (источник: {math_result['area_source']})"
         if area_breakdown:
             source_text += f"\n{area_breakdown}"
@@ -1507,6 +1522,20 @@ if predict_btn:
             st.metric("Длина раскладки", f"{result.get('estimated_length_m', '—')} м")
         with col4:
             st.metric("КПД раскладки", f"{result.get('estimated_efficiency_pct', '—')}%")
+
+        if density_gsm > 0:
+            try:
+                _ai_cons = float(result.get("consumption_m_per_piece"))
+                _ai_len = float(result.get("estimated_length_m"))
+            except (TypeError, ValueError):
+                _ai_cons = _ai_len = None
+            if _ai_cons is not None:
+                _wpp_g = _ai_cons * (width_cm / 100) * density_gsm
+                _total_kg = _ai_len * (width_cm / 100) * density_gsm / 1000
+                wc1, wc2, _, _ = st.columns(4)
+                wc1.metric("Вес ткани", f"{_wpp_g:.0f} г/шт")
+                wc2.metric("Вес на заказ", f"{_total_kg:.2f} кг")
+                st.caption(f"Вес рассчитан при плотности {density_gsm:.0f} г/м² и ширине {width_cm:.0f} см.")
 
         confidence = result.get("confidence", "—")
         confidence_map = {"high": "Высокая", "medium": "Средняя", "low": "Низкая"}
