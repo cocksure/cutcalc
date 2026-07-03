@@ -4,6 +4,7 @@ import json
 import colorsys
 import tempfile
 from collections import Counter
+from datetime import datetime
 
 import ezdxf
 import matplotlib
@@ -13,6 +14,7 @@ import matplotlib.patches as mpatches
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from fpdf import FPDF
 from openai import OpenAI
 
 load_dotenv()
@@ -1094,6 +1096,163 @@ def call_openai(messages: list[dict]) -> dict:
     return json.loads(text)
 
 
+# ── PDF report ────────────────────────────────────────────────────────────────
+
+CONFIDENCE_LABELS = {"high": "Высокая", "medium": "Средняя", "low": "Низкая"}
+
+
+def build_pdf_report(fc: dict) -> bytes:
+    """Build a nicely formatted PDF report of the forecast."""
+    INK = (31, 41, 55)
+    MUTED = (107, 114, 128)
+    ACCENT = (13, 110, 91)
+    CARD = (240, 246, 244)
+    LINE = (229, 231, 235)
+
+    font_dir = os.path.join(matplotlib.get_data_path(), "fonts", "ttf")
+    pdf = FPDF(format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.add_font("DejaVu", "", os.path.join(font_dir, "DejaVuSans.ttf"))
+    pdf.add_font("DejaVu", "B", os.path.join(font_dir, "DejaVuSans-Bold.ttf"))
+
+    content_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def section(title: str):
+        pdf.set_font("DejaVu", "B", 11)
+        pdf.set_text_color(*ACCENT)
+        pdf.cell(content_w, 8, title, new_x="LMARGIN", new_y="NEXT")
+
+    def metric_cards(items: list[tuple[str, str]]):
+        gap = 3
+        cw = (content_w - gap * (len(items) - 1)) / len(items)
+        x0, y0, h = pdf.l_margin, pdf.get_y(), 16
+        for i, (label, value) in enumerate(items):
+            x = x0 + i * (cw + gap)
+            pdf.set_fill_color(*CARD)
+            pdf.rect(x, y0, cw, h, style="F")
+            pdf.set_xy(x + 3, y0 + 2.5)
+            pdf.set_font("DejaVu", "", 7.5)
+            pdf.set_text_color(*MUTED)
+            pdf.cell(cw - 6, 4, label)
+            pdf.set_xy(x + 3, y0 + 7.5)
+            pdf.set_font("DejaVu", "B", 12)
+            pdf.set_text_color(*INK)
+            pdf.cell(cw - 6, 6, value)
+        pdf.set_y(y0 + h + 4)
+
+    # Header
+    pdf.set_text_color(*INK)
+    pdf.set_font("DejaVu", "B", 17)
+    pdf.cell(content_w, 10, "Прогноз нормы расхода ткани", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("DejaVu", "", 9)
+    pdf.set_text_color(*MUTED)
+    pdf.cell(
+        content_w, 6,
+        f"Модель: {fc['model_name'] or '—'}    •    Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        new_x="LMARGIN", new_y="NEXT",
+    )
+    pdf.ln(2)
+    pdf.set_draw_color(*LINE)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + content_w, pdf.get_y())
+    pdf.ln(4)
+
+    # Order parameters
+    section("Параметры заказа")
+    density_txt = f"{fc['density_gsm']:.0f} г/м²" if fc["density_gsm"] > 0 else "—"
+    params = [
+        ("Тип изделия", fc["product_type"] or "—"),
+        ("Тип ткани", fc["block_table"] or "—"),
+        ("Ширина ткани", f"{fc['width_cm']:.0f} см"),
+        ("Плотность", density_txt),
+        ("Размерный ассортимент", fc["sizes"]),
+        ("Изделий всего", str(fc["input_total"])),
+        ("Усадка / Растяжение", f"{fc['shrink_input']:.2f}% / {fc['stretch_input']:.2f}%"),
+    ]
+    pdf.set_font("DejaVu", "", 9.5)
+    for label, value in params:
+        pdf.set_text_color(*MUTED)
+        pdf.cell(content_w * 0.35, 6.5, label)
+        pdf.set_text_color(*INK)
+        pdf.multi_cell(content_w * 0.65, 6.5, str(value), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    width_m = fc["width_cm"] / 100
+    dens = fc["density_gsm"]
+
+    def weight_cards(cons, length, extra=None):
+        cards = []
+        if dens > 0 and cons is not None:
+            cards.append(("ВЕС ТКАНИ", f"{cons * width_m * dens:.0f} г/шт"))
+            cards.append(("ВЕС НА ЗАКАЗ", f"{length * width_m * dens / 1000:.2f} кг"))
+        if extra:
+            cards.append(extra)
+        if cards:
+            metric_cards(cards)
+
+    ai = fc.get("ai")
+    if ai:
+        section("Прогноз")
+        metric_cards([
+            ("РАСХОД", f"{ai.get('consumption_m_per_piece', '—')} м/шт"),
+            ("ДИАПАЗОН", f"{ai.get('range_min', '—')} – {ai.get('range_max', '—')}"),
+            ("ДЛИНА РАСКЛАДКИ", f"{ai.get('estimated_length_m', '—')} м"),
+            ("КПД", f"{ai.get('estimated_efficiency_pct', '—')}%"),
+        ])
+        try:
+            _cons = float(ai.get("consumption_m_per_piece"))
+            _len = float(ai.get("estimated_length_m"))
+        except (TypeError, ValueError):
+            _cons = _len = None
+        conf = ("УВЕРЕННОСТЬ", CONFIDENCE_LABELS.get(ai.get("confidence"), "—"))
+        weight_cards(_cons, _len, extra=conf)
+        explanation = ai.get("explanation")
+        if explanation:
+            pdf.set_font("DejaVu", "", 9)
+            pdf.set_text_color(*INK)
+            pdf.multi_cell(content_w, 5.5, str(explanation))
+            pdf.ln(2)
+
+    math_result = fc.get("math_result")
+    if math_result:
+        section("Математический расчёт (по площади лекал)")
+        metric_cards([
+            ("РАСХОД", f"{math_result['consumption_m_per_piece']} м/шт"),
+            ("ДИАПАЗОН", f"{math_result['range_min']} – {math_result['range_max']}"),
+            ("ДЛИНА РАСКЛАДКИ", f"{math_result['estimated_length_m']} м"),
+            ("КПД", f"{math_result['estimated_efficiency_pct']}%"),
+        ])
+        weight_cards(math_result["consumption_m_per_piece"], math_result["estimated_length_m"])
+        pdf.set_font("DejaVu", "", 8.5)
+        pdf.set_text_color(*MUTED)
+        source = (
+            f"Площадь лекал: {math_result['area_per_piece_m2']} м²/изделие "
+            f"(источник: {math_result['area_source']})"
+        )
+        if fc.get("area_breakdown"):
+            source += "\n" + fc["area_breakdown"]
+        pdf.multi_cell(content_w, 5, source)
+        pdf.ln(2)
+
+    stats = fc.get("stats")
+    if stats:
+        section(f"Статистика по похожим раскладкам ({stats['count']} записей)")
+        pdf.set_font("DejaVu", "", 9.5)
+        pdf.set_text_color(*INK)
+        pdf.multi_cell(
+            content_w, 6,
+            f"Расход: среднее {stats['consumption_mean']} м/шт, медиана {stats['consumption_median']} м/шт. "
+            f"КПД среднее: {stats['efficiency_mean']}%. Длина среднее: {stats['length_mean']} м.",
+        )
+        pdf.ln(2)
+
+    pdf.set_font("DejaVu", "", 7.5)
+    pdf.set_text_color(*MUTED)
+    pdf.cell(content_w, 5, "Сформировано приложением «Прогноз нормы расхода ткани»")
+
+    return bytes(pdf.output())
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Прогноз расхода ткани", layout="wide")
@@ -1469,6 +1628,7 @@ if predict_btn:
         )
 
     # ── Similar records search ────────────────────────────────────────────
+    notes = []
     similar = find_similar(
         df, product_type or None, width_cm, block_table or None,
         sizes, shrink_pct, stretch_pct,
@@ -1480,7 +1640,7 @@ if predict_btn:
             sizes, shrink_pct, stretch_pct,
         )
         if not similar.empty:
-            st.info("По ткани совпадений нет — показаны результаты без фильтра по ткани.")
+            notes.append("По ткани совпадений нет — показаны результаты без фильтра по ткани.")
 
     if similar.empty and product_type:
         similar = find_similar(
@@ -1488,35 +1648,130 @@ if predict_btn:
             sizes, shrink_pct, stretch_pct,
         )
         if not similar.empty:
-            st.info("По типу изделия совпадений нет — показаны результаты по всем типам.")
+            notes.append("По типу изделия совпадений нет — показаны результаты по всем типам.")
 
     if similar.empty and math_result is None:
         st.warning("Похожих раскладок не найдено и нет данных для математического расчёта.")
         st.stop()
 
-    # ── Show math prediction ──────────────────────────────────────────────
-    if math_result:
-        st.subheader("Математический прогноз (по площади лекал)")
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Расход", f"{math_result['consumption_m_per_piece']} м/шт")
-        mc2.metric("Диапазон", f"{math_result['range_min']} – {math_result['range_max']}")
-        mc3.metric("Длина раскладки", f"{math_result['estimated_length_m']} м")
-        mc4.metric("КПД (средний)", f"{math_result['estimated_efficiency_pct']}%")
-        if density_gsm > 0:
-            _wpp_g = math_result["consumption_m_per_piece"] * (width_cm / 100) * density_gsm
-            _total_kg = math_result["estimated_length_m"] * (width_cm / 100) * density_gsm / 1000
-            wc1, wc2, _, _ = st.columns(4)
-            wc1.metric("Вес ткани", f"{_wpp_g:.0f} г/шт")
-            wc2.metric("Вес на заказ", f"{_total_kg:.2f} кг")
-        source_text = f"Площадь лекал: {math_result['area_per_piece_m2']} м²/изделие (источник: {math_result['area_source']})"
-        if area_breakdown:
-            source_text += f"\n{area_breakdown}"
-        st.caption(source_text)
+    # ── AI prediction (compute) ───────────────────────────────────────────
+    stats = None
+    ai_result = None
+    if not similar.empty:
+        stats = compute_stats(similar)
+        messages = build_prompt(
+            model_name, product_type or "не указан", width_cm, sizes,
+            block_table or "не указан", shrink_pct, stretch_pct,
+            similar, stats, input_total, input_num_sizes, math_result,
+        )
+        with st.spinner("ИИ анализирует данные..."):
+            try:
+                ai_result = call_openai(messages)
+            except Exception as e:
+                st.error(f"Ошибка при обращении к OpenAI: {e}")
+                if math_result is None:
+                    st.stop()
+                notes.append("ИИ-прогноз недоступен — показан математический расчёт.")
+    elif math_result:
+        notes.append("Похожих раскладок не найдено — прогноз только по математической модели.")
 
-        # Show layout analysis if available
-        if layout_info:
-            with st.expander("Анализ раскладки деталей на ткани"):
-                st.markdown(f"**Ширина ткани: {width_cm} см**")
+    # Save everything needed for rendering & PDF — survives reruns
+    # (e.g. click on the PDF download button)
+    st.session_state["fc"] = {
+        "ai": ai_result,
+        "math_result": math_result,
+        "area_breakdown": area_breakdown,
+        "layout_info": layout_info,
+        "pieces_info": pieces_info,
+        "has_dxf": has_dxf,
+        "has_sized_measurements": has_sized_measurements,
+        "parsed_sizes_dict": dict(parsed_sizes_dict),
+        "similar": similar,
+        "stats": stats,
+        "notes": notes,
+        "model_name": model_name,
+        "product_type": product_type,
+        "block_table": block_table,
+        "sizes": sizes,
+        "width_cm": width_cm,
+        "density_gsm": density_gsm,
+        "input_total": input_total,
+        "shrink_input": shrink_pct_input,
+        "stretch_input": stretch_pct_input,
+    }
+
+# ── Results (rendered from session_state, so they survive reruns) ────────────
+
+fc = st.session_state.get("fc")
+if fc:
+    for note in fc["notes"]:
+        st.info(note)
+
+    ai = fc["ai"]
+    math_result = fc["math_result"]
+    width_m = fc["width_cm"] / 100
+    dens = fc["density_gsm"]
+
+    # ── AI forecast — the default view ────────────────────────────────────
+    if ai:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Расход", f"{ai.get('consumption_m_per_piece', '—')} м/шт")
+        col2.metric("Диапазон", f"{ai.get('range_min', '—')} – {ai.get('range_max', '—')}")
+        col3.metric("Длина раскладки", f"{ai.get('estimated_length_m', '—')} м")
+        col4.metric("КПД раскладки", f"{ai.get('estimated_efficiency_pct', '—')}%")
+
+        if dens > 0:
+            try:
+                _ai_cons = float(ai.get("consumption_m_per_piece"))
+                _ai_len = float(ai.get("estimated_length_m"))
+            except (TypeError, ValueError):
+                _ai_cons = _ai_len = None
+            if _ai_cons is not None:
+                wc1, wc2, _, _ = st.columns(4)
+                wc1.metric("Вес ткани", f"{_ai_cons * width_m * dens:.0f} г/шт")
+                wc2.metric("Вес на заказ", f"{_ai_len * width_m * dens / 1000:.2f} кг")
+                st.caption(
+                    f"Вес рассчитан при плотности {dens:.0f} г/м² "
+                    f"и ширине {fc['width_cm']:.0f} см."
+                )
+
+        confidence = ai.get("confidence", "—")
+        confidence_colors = {"high": "green", "medium": "orange", "low": "red"}
+        color = confidence_colors.get(confidence, "gray")
+        label = CONFIDENCE_LABELS.get(confidence, confidence)
+        st.markdown(f"**Уверенность:** :{color}[{label}]")
+
+        with st.expander("Анализ ИИ"):
+            st.info(ai.get("explanation", "—"))
+
+    # ── Math forecast — collapsed unless it is the only result ───────────
+    if math_result:
+        with st.expander(
+            "Математический расчёт (по площади лекал)", expanded=ai is None,
+        ):
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Расход", f"{math_result['consumption_m_per_piece']} м/шт")
+            mc2.metric("Диапазон", f"{math_result['range_min']} – {math_result['range_max']}")
+            mc3.metric("Длина раскладки", f"{math_result['estimated_length_m']} м")
+            mc4.metric("КПД (средний)", f"{math_result['estimated_efficiency_pct']}%")
+            if dens > 0:
+                wc1, wc2, _, _ = st.columns(4)
+                _wpp_g = math_result["consumption_m_per_piece"] * width_m * dens
+                _total_kg = math_result["estimated_length_m"] * width_m * dens / 1000
+                wc1.metric("Вес ткани", f"{_wpp_g:.0f} г/шт")
+                wc2.metric("Вес на заказ", f"{_total_kg:.2f} кг")
+            source_text = (
+                f"Площадь лекал: {math_result['area_per_piece_m2']} м²/изделие "
+                f"(источник: {math_result['area_source']})"
+            )
+            if fc["area_breakdown"]:
+                source_text += f"\n{fc['area_breakdown']}"
+            st.caption(source_text)
+
+            layout_info = fc["layout_info"]
+            if layout_info:
+                st.markdown("**Анализ раскладки деталей на ткани**")
+                st.markdown(f"Ширина ткани: {fc['width_cm']} см")
                 for d in layout_info["details"]:
                     orient_icon = "↕" if "верт" in d["orientation"] else "↔"
                     st.markdown(
@@ -1535,92 +1790,52 @@ if predict_btn:
                 )
 
     # ── Marker layout visualization (only for per-size or DXF) ──────────
-    if pieces_info and (has_sized_measurements or has_dxf):
-        st.subheader("Визуализация маркер-раскладки")
-        try:
-            sb = None
-            if has_dxf:
-                sb = {"DXF": input_total}
-            elif has_sized_measurements:
-                sb = dict(parsed_sizes_dict)
-            marker_fig, marker_len, marker_eff = draw_marker_layout(
-                pieces_info, width_cm, input_total,
-                sizes_breakdown=sb,
-            )
-            st.pyplot(marker_fig)
-            plt.close(marker_fig)
-            st.caption(
-                f"Симуляция раскладки (FFDH-алгоритм): длина {marker_len} м, "
-                f"КПД упаковки {marker_eff}%. "
-                f"Реальная раскладка в CAD-системе будет эффективнее за счёт нестинга."
-            )
-        except Exception as e:
-            st.warning(f"Не удалось построить визуализацию: {e}")
-
-    # ── AI prediction ─────────────────────────────────────────────────────
-    if not similar.empty:
-        stats = compute_stats(similar)
-
-        messages = build_prompt(
-            model_name, product_type or "не указан", width_cm, sizes,
-            block_table or "не указан", shrink_pct, stretch_pct,
-            similar, stats, input_total, input_num_sizes, math_result,
-        )
-
-        with st.spinner("ИИ анализирует данные..."):
+    if fc["pieces_info"] and (fc["has_sized_measurements"] or fc["has_dxf"]):
+        with st.expander("Визуализация маркер-раскладки"):
             try:
-                result = call_openai(messages)
+                sb = None
+                if fc["has_dxf"]:
+                    sb = {"DXF": fc["input_total"]}
+                elif fc["has_sized_measurements"]:
+                    sb = dict(fc["parsed_sizes_dict"])
+                marker_fig, marker_len, marker_eff = draw_marker_layout(
+                    fc["pieces_info"], fc["width_cm"], fc["input_total"],
+                    sizes_breakdown=sb,
+                )
+                st.pyplot(marker_fig)
+                plt.close(marker_fig)
+                st.caption(
+                    f"Симуляция раскладки (FFDH-алгоритм): длина {marker_len} м, "
+                    f"КПД упаковки {marker_eff}%. "
+                    f"Реальная раскладка в CAD-системе будет эффективнее за счёт нестинга."
+                )
             except Exception as e:
-                st.error(f"Ошибка при обращении к OpenAI: {e}")
-                st.stop()
+                st.warning(f"Не удалось построить визуализацию: {e}")
 
-        st.subheader("Финальный прогноз ИИ")
+    # ── Stats & similar records ──────────────────────────────────────────
+    if fc["stats"]:
+        stats = fc["stats"]
+        with st.expander(f"Похожие раскладки ({stats['count']} записей) и статистика"):
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.metric("Расход среднее", f"{stats['consumption_mean']} м/шт")
+            sc2.metric("Расход медиана", f"{stats['consumption_median']} м/шт")
+            sc3.metric("КПД среднее", f"{stats['efficiency_mean']}%")
+            sc4.metric("Длина среднее", f"{stats['length_mean']} м")
+            st.dataframe(
+                fc["similar"][DISPLAY_COLUMNS],
+                use_container_width=True, hide_index=True,
+            )
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Расход", f"{result.get('consumption_m_per_piece', '—')} м/шт")
-        with col2:
-            r_min = result.get("range_min", "—")
-            r_max = result.get("range_max", "—")
-            st.metric("Диапазон", f"{r_min} – {r_max}")
-        with col3:
-            st.metric("Длина раскладки", f"{result.get('estimated_length_m', '—')} м")
-        with col4:
-            st.metric("КПД раскладки", f"{result.get('estimated_efficiency_pct', '—')}%")
-
-        if density_gsm > 0:
-            try:
-                _ai_cons = float(result.get("consumption_m_per_piece"))
-                _ai_len = float(result.get("estimated_length_m"))
-            except (TypeError, ValueError):
-                _ai_cons = _ai_len = None
-            if _ai_cons is not None:
-                _wpp_g = _ai_cons * (width_cm / 100) * density_gsm
-                _total_kg = _ai_len * (width_cm / 100) * density_gsm / 1000
-                wc1, wc2, _, _ = st.columns(4)
-                wc1.metric("Вес ткани", f"{_wpp_g:.0f} г/шт")
-                wc2.metric("Вес на заказ", f"{_total_kg:.2f} кг")
-                st.caption(f"Вес рассчитан при плотности {density_gsm:.0f} г/м² и ширине {width_cm:.0f} см.")
-
-        confidence = result.get("confidence", "—")
-        confidence_map = {"high": "Высокая", "medium": "Средняя", "low": "Низкая"}
-        confidence_colors = {"high": "green", "medium": "orange", "low": "red"}
-        color = confidence_colors.get(confidence, "gray")
-        label = confidence_map.get(confidence, confidence)
-        st.markdown(f"**Уверенность:** :{color}[{label}]")
-
-        st.subheader("Анализ ИИ")
-        st.info(result.get("explanation", "—"))
-
-        # ── Stats & table ─────────────────────────────────────────────────
-        st.subheader("Статистика по похожим раскладкам")
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("Расход среднее", f"{stats['consumption_mean']} м/шт")
-        sc2.metric("Расход медиана", f"{stats['consumption_median']} м/шт")
-        sc3.metric("КПД среднее", f"{stats['efficiency_mean']}%")
-        sc4.metric("Длина среднее", f"{stats['length_mean']} м")
-
-        st.subheader(f"Похожие раскладки ({stats['count']} записей)")
-        st.dataframe(similar[DISPLAY_COLUMNS], use_container_width=True, hide_index=True)
-    elif math_result:
-        st.info("Похожих раскладок не найдено — прогноз только по математической модели.")
+    # ── PDF download ──────────────────────────────────────────────────────
+    try:
+        pdf_bytes = build_pdf_report(fc)
+        model_slug = (fc["model_name"] or "report").strip().replace(" ", "_") or "report"
+        st.download_button(
+            "⬇ Скачать отчёт (PDF)",
+            data=pdf_bytes,
+            file_name=f"raskhod_{model_slug}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.warning(f"Не удалось сформировать PDF: {e}")

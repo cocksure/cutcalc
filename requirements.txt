@@ -5,3 +5,4 @@ openpyxl
 python-dotenv
 matplotlib
 ezdxf
+fpdf2
