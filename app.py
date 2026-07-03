@@ -1162,15 +1162,54 @@ with st.sidebar:
                     df_dxf = pd.DataFrame(dxf_pieces)
                     df_dxf = df_dxf[["name", "area_cm2", "width_cm", "height_cm"]]
                     df_dxf.columns = ["Деталь", "Площадь (см²)", "Ширина (см)", "Высота (см)"]
-                    st.dataframe(df_dxf, use_container_width=True, hide_index=True)
-                    total_dxf_area = sum(p["area_cm2"] for p in dxf_pieces)
+                    df_dxf.insert(1, "Кол-во", 1)
+                    df_dxf.insert(2, "Сгиб ×2", False)
+                    st.caption(
+                        "Проверьте комплектность: **Кол-во** — сколько раз деталь входит "
+                        "в одно изделие (рукав, манжета — обычно 2). **Сгиб ×2** — если "
+                        "лекало построено половинкой к сгибу. Иначе площадь и вес будут занижены."
+                    )
+                    mirror_all = st.checkbox(
+                        "В DXF только одна сторона комплекта — удвоить все детали (×2)",
+                        key=f"dxf_mirror_{uploaded_dxf.name}",
+                        help="Например, брюки: в файле лекала только одной стороны "
+                             "(24 детали вместо 48) — каждая кроится зеркально дважды.",
+                    )
+                    edited_dxf = st.data_editor(
+                        df_dxf,
+                        use_container_width=True,
+                        hide_index=True,
+                        disabled=["Деталь", "Площадь (см²)", "Ширина (см)", "Высота (см)"],
+                        column_config={
+                            "Кол-во": st.column_config.NumberColumn("Кол-во", min_value=1, max_value=10, step=1),
+                            "Сгиб ×2": st.column_config.CheckboxColumn("Сгиб ×2"),
+                        },
+                        key=f"dxf_editor_{uploaded_dxf.name}",
+                    )
+                    for i, p in enumerate(dxf_pieces):
+                        p["qty"] = max(int(edited_dxf.iloc[i]["Кол-во"] or 1), 1)
+                        if mirror_all:
+                            p["qty"] *= 2
+                        if bool(edited_dxf.iloc[i]["Сгиб ×2"]):
+                            p["area_cm2"] *= 2
+                            p["width_cm"] *= 2
+                    total_dxf_area = sum(p["area_cm2"] * p["qty"] for p in dxf_pieces)
                     units = dxf_diag.get("units_detected", "")
                     st.success(
                         f"Найдено {len(dxf_pieces)} деталей, "
-                        f"общая площадь: {total_dxf_area:.0f} см² "
+                        f"площадь комплекта на изделие: {total_dxf_area:.0f} см² "
                         f"({total_dxf_area / 10000:.4f} м²)"
                         f"{f' | Единицы: {units}' if units else ''}"
                     )
+                    if product_type and product_type in area_coeffs:
+                        _hist_area = area_coeffs[product_type]["area_mean"]
+                        if total_dxf_area / 10000 < 0.7 * _hist_area:
+                            st.warning(
+                                f"Площадь комплекта ({total_dxf_area / 10000:.2f} м²) заметно меньше "
+                                f"исторической средней для «{product_type}» ({_hist_area:.2f} м²). "
+                                "Обычно это значит, что не учтены парные детали или детали к сгибу — "
+                                "проверьте колонки «Кол-во» и «Сгиб ×2»."
+                            )
                 else:
                     st.warning("Не найдено деталей в DXF файле.")
                     # Show diagnostics to help debug
@@ -1343,20 +1382,21 @@ if predict_btn:
     has_dxf = len(dxf_pieces) > 0
 
     if has_dxf:
-        # Use DXF-parsed exact areas and bounding boxes
-        total_dxf_area_cm2 = sum(p["area_cm2"] for p in dxf_pieces)
+        # Use DXF-parsed exact areas and bounding boxes, qty = pieces per garment
+        total_dxf_area_cm2 = sum(p["area_cm2"] * p.get("qty", 1) for p in dxf_pieces)
         manual_area = round(total_dxf_area_cm2 / 10000, 4)  # cm² → m²
+        n_details = sum(p.get("qty", 1) for p in dxf_pieces)
         area_breakdown = (
             f"Площадь из DXF: {total_dxf_area_cm2:.0f} см² = {manual_area} м²/изделие "
-            f"({len(dxf_pieces)} деталей)"
+            f"({n_details} деталей с учётом количества)"
         )
         # Convert DXF pieces to 5-tuple format for marker visualization
-        # Each DXF piece × total_garments (one DXF = one garment set)
+        # Each DXF piece × qty per garment × total_garments
         pieces_info = []
         for p in dxf_pieces:
             pieces_info.append((
                 p["width_cm"], p["height_cm"], p["name"],
-                input_total,  # total count across all garments
+                input_total * p.get("qty", 1),  # total count across all garments
                 "DXF",
             ))
         if pieces_info:
