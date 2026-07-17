@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pdfplumber
 
-PDF_DIR = Path("/Users/sanjarmaxmudov/Downloads/rasklad for analsys")
+PDF_DIR = Path("/Users/sanjarmaxmudov/Downloads/pastal")
 OUT_XLSX = Path(__file__).resolve().parent / "markers_data.xlsx"
 
 
@@ -88,6 +88,16 @@ def sort_size_pairs(pairs: list[tuple[str, int]]) -> list[tuple[str, int]]:
 def _parse_sizes_and_total(text: str) -> tuple[str | None, int | None]:
     # normalize spaces/newlines
     t = re.sub(r"\s+", " ", text)
+
+    # 0) combined sizes: S_44/1 M_46/4 3XL_54/2 — sort by numeric part
+    combo_pairs = re.findall(r"\b([0-9A-Za-zА-Я]+_\d{2,3})\s*/\s*(\d+)\b", t)
+    if combo_pairs:
+        pairs2 = sorted(
+            [(s, int(q)) for s, q in combo_pairs],
+            key=lambda x: int(x[0].split("_")[-1]),
+        )
+        sizes_str = " ".join(f"{s}/{q}" for s, q in pairs2)
+        return sizes_str, sum(q for _, q in pairs2)
 
     # 1) letter sizes (incl 2XS, 3XL, XS/S, XL/2XL, OS, ONE)
     letter_pairs = re.findall(
